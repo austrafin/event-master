@@ -37,7 +37,7 @@ class PersonalSchedule(TypedDict):
     events: list[EventPersonal]
 
 
-type EventsByName = dict[str, Event]
+type Events = dict[tuple[str, date, time, time, str], Event]
 
 type SchedulesByPerson = dict[str, list[EventPersonal]]
 
@@ -67,7 +67,7 @@ def get_datetime(date: str) -> datetime:
 
 def add_event(
     event_name: str,
-    events_by_name: EventsByName,
+    events_by_name: Events,
     person: str,
     group: str,
     event_date: date,
@@ -75,8 +75,10 @@ def add_event(
     end_time: time,
     place: str,
 ):
-    if event_name not in events_by_name:
-        events_by_name[event_name] = {
+    key = (event_name, event_date, start_time, end_time, place)
+
+    if key not in events_by_name:
+        events_by_name[key] = {
             "name": event_name,
             "date": event_date,
             "start_time": start_time,
@@ -87,7 +89,7 @@ def add_event(
         }
         return
 
-    existing_event = events_by_name[event_name]
+    existing_event = events_by_name[key]
 
     for key, new_value in (("people", person), ("groups", group)):
         if person not in existing_event[key]:
@@ -130,7 +132,7 @@ def add_personal_event(
 def get_schedules(
     input_file: str,
 ) -> tuple[tuple[Event, ...], tuple[PersonalSchedule, ...]]:
-    events_by_name: EventsByName = {}
+    events_by_name: Events = {}
     schedules_by_person: SchedulesByPerson = {}
 
     with open(input_file, newline="", encoding="utf-8") as csvfile:
