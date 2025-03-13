@@ -1,10 +1,10 @@
 import csv
 import os
 from argparse import ArgumentParser
-from typing import TypedDict
+from typing import Callable, Literal, TypeVar, TypedDict, cast
 from datetime import date, time, datetime
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import (
     SimpleDocTemplate,
     Paragraph,
@@ -23,9 +23,13 @@ class EventBase(TypedDict):
     place: str
 
 
+class Person(TypedDict):
+    name: str
+    group: str
+
+
 class Event(EventBase):
-    groups: list[str]
-    people: list[str]
+    people: list[Person]
 
 
 class EventPersonal(EventBase):
@@ -34,12 +38,21 @@ class EventPersonal(EventBase):
 
 class PersonalSchedule(TypedDict):
     person: str
-    events: list[EventPersonal]
+    events: tuple[EventPersonal, ...]
 
 
 type Events = dict[tuple[str, date, time, time, str], Event]
 
+type EventsByDate = dict[str, list[EventBase]]
+
 type SchedulesByPerson = dict[str, list[EventPersonal]]
+
+type TableRow = tuple[str | Paragraph, ...]
+
+type PDFContent = list[Flowable]
+
+
+Schedule = TypeVar("Schedule", bound=EventBase)
 
 DATE_FORMAT = "%d/%m/%Y"
 
@@ -47,22 +60,43 @@ TIME_FORMAT = "%H.%M"
 
 PAGE_MARGIN = 30
 
+FONT_SIZE = 8
+
 styles = getSampleStyleSheet()
 spacer = Spacer(1, 12)
 table_style = TableStyle(
     (
         ("ALIGN", (0, 0), (-1, -1), "LEFT"),
         ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
-        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("FONTSIZE", (0, 0), (-1, -1), FONT_SIZE),
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
         ("RIGHTPADDING", (0, 0), (-1, -1), 0),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
     )
 )
+date_style = ParagraphStyle(
+    name="Date",
+    parent=styles["Heading2"],
+    keepWithNext=True,
+)
+paragraph_style = ParagraphStyle(
+    name="TableCell",
+    parent=styles["Normal"],
+    fontSize=FONT_SIZE,
+)
 
 
 def get_datetime(date: str) -> datetime:
     return datetime.strptime(date, f"{DATE_FORMAT} {TIME_FORMAT}")
+
+
+def get_events_sorted_by_time(
+    events: list[Schedule],
+) -> list[Schedule]:
+    return sorted(
+        events,
+        key=lambda event: (event["date"], event["start_time"]),
+    )
 
 
 def add_event(
@@ -76,6 +110,7 @@ def add_event(
     place: str,
 ):
     key = (event_name, event_date, start_time, end_time, place)
+    person_and_group: Person = {"name": person, "group": group}
 
     if key not in events_by_name:
         events_by_name[key] = {
@@ -84,24 +119,13 @@ def add_event(
             "start_time": start_time,
             "end_time": end_time,
             "place": place,
-            "groups": [group],
-            "people": [person],
+            "people": [person_and_group],
         }
         return
 
     existing_event = events_by_name[key]
 
-    for key, new_value in (("people", person), ("groups", group)):
-        if person not in existing_event[key]:
-            existing_event[key].append(new_value)  # type: ignore
-
-    existing_event["date"] = event_date
-
-    if start_time < existing_event["start_time"]:
-        existing_event["start_time"] = start_time
-
-    if end_time > existing_event["end_time"]:
-        existing_event["end_time"] = end_time
+    existing_event["people"].append(person_and_group)
 
 
 def add_personal_event(
@@ -179,9 +203,7 @@ def get_schedules(
         tuple(
             {
                 "person": person,
-                "events": sorted(
-                    events, key=lambda event: (event["date"], event["start_time"])
-                ),
+                "events": tuple(get_events_sorted_by_time(events)),
             }
             for person, events in schedules_by_person.items()
         ),
@@ -196,10 +218,8 @@ def get_time(time: time) -> str:
     return time.strftime(TIME_FORMAT)
 
 
-def get_events_by_date(
-    events: list[EventPersonal],
-) -> dict[str, list[EventPersonal]]:
-    events_by_date: dict[str, list[EventPersonal]] = {}
+def get_events_by_date(events: tuple[EventBase, ...]) -> EventsByDate:
+    events_by_date: EventsByDate = {}
 
     for event in events:
         date_str = get_date(event["date"])
@@ -209,41 +229,86 @@ def get_events_by_date(
 
         events_by_date[date_str].append(event)
 
+    for date_str, events_grouped in events_by_date.items():
+        events_by_date[date_str] = get_events_sorted_by_time(events_grouped)
+
     return events_by_date
 
 
-def build_pdf(person_name: str, events: list[EventPersonal]) -> list[Flowable]:
-    elements: list[Flowable] = []
+def get_event_duration(event: EventBase) -> str:
+    return f"{get_time(event['start_time'])} - {get_time(event['end_time'])}"
 
-    elements.append(Paragraph(person_name, styles["Title"]))
-    elements.append(spacer)
 
-    for date_str, events in get_events_by_date(events).items():
-        elements.append(Paragraph(date_str, styles["Heading2"]))
+def get_event_name(event: EventBase) -> Paragraph:
+    return Paragraph(event["name"], paragraph_style)
 
-        table_data = [
-            (
-                f"{get_time(event['start_time'])} - {get_time(event['end_time'])}",
-                Paragraph(event["name"]),
-                event["group"],
-                event["place"],
-            )
-            for event in events
-        ]
+
+def get_people_list(
+    key: Literal["name"] | Literal["group"], list_to_stringify: list[Person]
+) -> str:
+    return "".join(f"{item[key]}\n" for item in list_to_stringify)
+
+
+def build_schedule_pdf(
+    title: str,
+    events_by_date: dict[str, list[Schedule]],
+    get_row: Callable[[EventBase], TableRow],
+    col_widths: tuple[int, ...],
+) -> PDFContent:
+    elements: PDFContent = [Paragraph(title, styles["Title"]), spacer]
+
+    for date_str, events_on_same_date in events_by_date.items():
+        elements.append(Paragraph(date_str, date_style))
+
+        table_data = [get_row(event) for event in events_on_same_date]
 
         if not table_data:
             continue
 
-        table = Table(table_data, colWidths=(80, 225, 120, 100))
+        table = Table(table_data, colWidths=col_widths)
 
         table.setStyle(table_style)
-        elements.append(table)
-        elements.append(spacer)
+        elements.extend((table, spacer))
 
     return elements
 
 
-def create_pdf(elements: list[Flowable], output_path: str):
+def build_overall_schedule_pdf(events: tuple[Event, ...]) -> PDFContent:
+    def get_row(event: EventBase) -> TableRow:
+        event = cast(Event, event)
+
+        return (
+            get_event_duration(event),
+            get_event_name(event),
+            get_people_list("name", event["people"]),
+            get_people_list("group", event["people"]),
+            event["place"],
+        )
+
+    return build_schedule_pdf(
+        "Aikataulu", get_events_by_date(events), get_row, (80, 174, 90, 100, 80)
+    )
+
+
+def build_personal_schedule_pdf(
+    person_name: str, events: tuple[EventPersonal, ...]
+) -> PDFContent:
+    def get_row(event: EventBase) -> TableRow:
+        event = cast(EventPersonal, event)
+
+        return (
+            get_event_duration(event),
+            get_event_name(event),
+            event["group"],
+            event["place"],
+        )
+
+    return build_schedule_pdf(
+        person_name, get_events_by_date(events), get_row, (80, 225, 120, 100)
+    )
+
+
+def create_pdf(elements: PDFContent, output_path: str):
     SimpleDocTemplate(
         output_path,
         pagesize=A4,
@@ -263,10 +328,15 @@ if __name__ == "__main__":
 
     os.makedirs(args.output_folder, exist_ok=True)
 
+    create_pdf(
+        build_overall_schedule_pdf(all_events),
+        os.path.join(args.output_folder, "schedule.pdf"),
+    )
+
     for schedule in personal_schedules:
         person = schedule["person"]
 
         create_pdf(
-            build_pdf(person, schedule["events"]),
+            build_personal_schedule_pdf(person, schedule["events"]),
             os.path.join(args.output_folder, f"{person}.pdf"),
         )
