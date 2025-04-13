@@ -1,7 +1,7 @@
 import csv
 import os
 from argparse import ArgumentParser
-from typing import Callable, Literal, TypeVar, TypedDict, cast
+from typing import Callable, TypeVar, TypedDict, cast
 from datetime import date, time, datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -47,7 +47,7 @@ type EventsByDate = dict[str, list[EventBase]]
 
 type SchedulesByPerson = dict[str, list[EventPersonal]]
 
-type TableRow = tuple[str | Paragraph, ...]
+type EventRow = tuple[str | Paragraph, ...]
 
 type PDFContent = list[Flowable]
 
@@ -69,6 +69,8 @@ table_style = TableStyle(
         ("ALIGN", (0, 0), (-1, -1), "LEFT"),
         ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
         ("FONTSIZE", (0, 0), (-1, -1), FONT_SIZE),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
         ("RIGHTPADDING", (0, 0), (-1, -1), 0),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -79,11 +81,17 @@ date_style = ParagraphStyle(
     parent=styles["Heading2"],
     keepWithNext=True,
 )
-paragraph_style = ParagraphStyle(
-    name="TableCell",
-    parent=styles["Normal"],
-    fontSize=FONT_SIZE,
-)
+
+
+def get_paragraph(text: str) -> Paragraph:
+    return Paragraph(
+        text,
+        ParagraphStyle(
+            name="TableCell",
+            parent=styles["Normal"],
+            fontSize=FONT_SIZE,
+        ),
+    )
 
 
 def get_datetime(date: str) -> datetime:
@@ -239,20 +247,10 @@ def get_event_duration(event: EventBase) -> str:
     return f"{get_time(event['start_time'])} - {get_time(event['end_time'])}"
 
 
-def get_event_name(event: EventBase) -> Paragraph:
-    return Paragraph(event["name"], paragraph_style)
-
-
-def get_people_list(
-    key: Literal["name"] | Literal["group"], list_to_stringify: list[Person]
-) -> str:
-    return "".join(f"{item[key]}\n" for item in list_to_stringify)
-
-
 def build_schedule_pdf(
     title: str,
     events_by_date: dict[str, list[Schedule]],
-    get_row: Callable[[EventBase], TableRow],
+    get_event: Callable[[EventBase], tuple[EventRow, ...]],
     col_widths: tuple[int, ...],
 ) -> PDFContent:
     elements: PDFContent = [Paragraph(title, styles["Title"]), spacer]
@@ -260,7 +258,9 @@ def build_schedule_pdf(
     for date_str, events_on_same_date in events_by_date.items():
         elements.append(Paragraph(date_str, date_style))
 
-        table_data = [get_row(event) for event in events_on_same_date]
+        table_data = tuple(
+            row for event in events_on_same_date for row in get_event(event)
+        )
 
         if not table_data:
             continue
@@ -273,38 +273,64 @@ def build_schedule_pdf(
     return elements
 
 
+def get_person_in_event(
+    index: int,
+    event: EventBase,
+    person: Person,
+) -> EventRow:
+    if index == 0:
+        duration = get_event_duration(event)
+        name = event["name"]
+        place = event["place"]
+    else:
+        duration = ""
+        name = ""
+        place = ""
+
+    return (
+        duration,
+        name,
+        get_paragraph(person["name"]),
+        get_paragraph(person["group"]),
+        place,
+    )
+
+
 def build_overall_schedule_pdf(events: tuple[Event, ...]) -> PDFContent:
-    def get_row(event: EventBase) -> TableRow:
+    def get_event(event: EventBase) -> tuple[EventRow, ...]:
         event = cast(Event, event)
 
-        return (
-            get_event_duration(event),
-            get_event_name(event),
-            get_people_list("name", event["people"]),
-            get_people_list("group", event["people"]),
-            event["place"],
-        )
+        # Include an empty row for spacing
+        return tuple(
+            get_person_in_event(i, event, person)
+            for i, person in enumerate(event["people"])
+        ) + ((),)
 
     return build_schedule_pdf(
-        "Aikataulu", get_events_by_date(events), get_row, (80, 174, 90, 100, 80)
+        "Aikataulu",
+        get_events_by_date(events),
+        get_event,
+        (80, 174, 90, 100, 80),
     )
 
 
 def build_personal_schedule_pdf(
     person_name: str, events: tuple[EventPersonal, ...]
 ) -> PDFContent:
-    def get_row(event: EventBase) -> TableRow:
+    def get_event(event: EventBase) -> tuple[EventRow, ...]:
         event = cast(EventPersonal, event)
 
         return (
-            get_event_duration(event),
-            get_event_name(event),
-            event["group"],
-            event["place"],
+            (
+                get_event_duration(event),
+                get_paragraph(event["name"]),
+                get_paragraph(event["group"]),
+                event["place"],
+            ),
         )
 
     return build_schedule_pdf(
-        person_name, get_events_by_date(events), get_row, (80, 225, 120, 100)
+        person_name, get_events_by_date(events), get_event, (80, 225, 120, 100)
     )
 
 
