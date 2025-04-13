@@ -1,4 +1,5 @@
 import csv
+import locale
 import os
 from argparse import ArgumentParser
 from typing import Callable, TypeVar, TypedDict, cast
@@ -230,7 +231,8 @@ def get_events_by_date(events: tuple[EventBase, ...]) -> EventsByDate:
     events_by_date: EventsByDate = {}
 
     for event in events:
-        date_str = get_date(event["date"])
+        date = event["date"]
+        date_str = f"{date.strftime('%A')} {get_date(date)}".capitalize()
 
         if date_str not in events_by_date:
             events_by_date[date_str] = []
@@ -344,6 +346,8 @@ def create_pdf(elements: PDFContent, output_path: str):
 
 
 if __name__ == "__main__":
+    locale.setlocale(locale.LC_ALL, "fi_FI.UTF-8")
+
     parser = ArgumentParser()
 
     parser.add_argument("input_filepath", type=str)
