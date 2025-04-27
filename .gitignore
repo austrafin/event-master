@@ -176,5 +176,6 @@ cython_debug/
 # Test files
 *.csv
 
-# Backup files
+# Generated files
 *.bak
+*.pdf
